@@ -1237,6 +1237,43 @@ get_wrapper_shared_vtype (MonoType *t)
 		if (m_class_is_byreflike (mono_class_from_mono_type_internal (ftype)))
 			/* Cannot inflate generic params with byreflike types */
 			return NULL;
+#ifdef TARGET_WASM
+		/*
+		 * Give an integer field slot the same type the size-based block below would give a slot
+		 * of that width. This function has two producers of a slot type and they must agree,
+		 * because its own result is fed back INTO it - dotnet/runtime#130592.
+		 *
+		 * mini_get_gsharedvt_{in,out}_sig_wrapper () store their ALREADY-UNDERLYING signature in
+		 * the wrapper's WrapperInfo; the AOT compiler encodes that signature into the method-ref
+		 * blob; and decode_method_ref_with_target () hands it straight back to
+		 * mini_get_gsharedvt_out_sig_wrapper (), which underlies it a SECOND time. So the mapping
+		 * has to be a fixed point, or the wrapper that is emitted is one nothing can ask for while
+		 * the one every caller asks for is absent - which under llvmonly+interp is a hard
+		 * "Attempting to JIT compile method '(wrapper other) ... gsharedvt_out_sig ...' while
+		 * running in aot-only mode" at the first interpreter->AOT call.
+		 *
+		 * It was not a fixed point, and this is where it moved. The block below is a pure function
+		 * of (align, size), and the FIELD loop can change the size of its own output: an
+		 * [InlineArray(N)] class has exactly one field by construction (mono_class_layout_fields ()
+		 * refuses any other count) while its value size is N times that field's. So 32-byte
+		 * InlineArray8<uint> mapped to 4-byte Mono.ValueTuple`1<uint> with the gate SHUT
+		 * (32 > 4 * 5); applied to THAT, the gate was OPEN (4 <= 4 * 5) and rewrote the slot from
+		 * uint32 to int32. Measured instance, out of
+		 * System.Buffers.IndexOfAnyAsciiSearcher/AsciiState:.ctor (Vector128`1<byte>,BitVector256):
+		 *
+		 *   Mono.ValueTuple`1<Mono.ValueTuple`1<uint>> -> Mono.ValueTuple`1<Mono.ValueTuple`1<int>>
+		 *
+		 * With both producers agreeing on the slot type, the gate can no longer change a slot's
+		 * TYPE, only the slot COUNT - and the one construct that changes the count between
+		 * applications collapses to a single slot, whose size yields a count of one again.
+		 * Signedness carries no ABI meaning for these types: the Mono.ValueTuple instantiations
+		 * exist only to describe layout.
+		 */
+		if (ftype->type == MONO_TYPE_U4)
+			ftype = m_class_get_byval_arg (mono_get_int32_class ());
+		else if (ftype->type == MONO_TYPE_U8)
+			ftype = m_class_get_byval_arg (mono_get_int64_class ());
+#endif
 		if (!has_explicit_size) {
 			args [findex ++] = ftype;
 			if (findex >= 16)
